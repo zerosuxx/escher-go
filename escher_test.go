@@ -1,10 +1,10 @@
 package escher
 
 import (
-  "testing"
+  "encoding/json"
   . "github.com/smartystreets/goconvey/convey"
   "io/ioutil"
-  "encoding/json"
+  "testing"
 )
 
 var tests = map[string]map[string][]string {
@@ -55,7 +55,9 @@ var tests = map[string]map[string][]string {
       "signrequest-only-sign-specified-headers",
     },
     "presignUrl": []string {
-      // "presignurl-valid-with-path-query",
+      "presignurl-valid",
+      "presignurl-valid-with-path",
+      "presignurl-valid-with-path-query",
     },
     "authenticate": []string {
       // "authenticate-valid-authentication-datein-expiretime",
@@ -99,6 +101,7 @@ type TestConfigExpected struct {
   CanonicalizedRequest string
   StringToSign string
   AuthHeader string
+  Expires int
 }
 
 type TestConfig struct {
@@ -181,6 +184,17 @@ func TestCanonicalizeRequest(t *testing.T) {
           So(request, ShouldResemble, testConfig.Expected.Request)
         })
       }
+    }
+  })
+
+  Convey("PresignUrl should return with a properly signed request url", t, func() {
+    for _, testConfig := range getTestConfigsForTopic("presignUrl") {
+      var escher = Escher(testConfig.Config)
+      var testTitle = testConfig.getTitle()
+      Convey(testTitle, func() {
+        var url = escher.PresignUrl(testConfig.Request.Url, testConfig.Expected.Expires)
+        So(url, ShouldEqual, testConfig.Expected.Request.Url)
+      })
     }
   })
 
