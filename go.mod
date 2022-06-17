@@ -1,4 +1,4 @@
-module zerosuxx/escher-go
+module github.com/zerosuxx/escher-go
 
 go 1.18
 
