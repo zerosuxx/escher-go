@@ -6,6 +6,7 @@ import (
   "crypto/sha256"
   "crypto/sha512"
   "encoding/hex"
+  "strconv"
   "strings"
   "sort"
   "time"
@@ -53,9 +54,35 @@ func Escher(config EscherConfig) EscherConfig {
   return config
 }
 
+func (config EscherConfig) PresignUrl(requestUrl string, expires int) string {
+  u, _ := url.Parse(requestUrl)
+
+  if u.RawQuery != "" {
+    u.RawQuery += "&"
+  }
+
+  escherParams := []string{
+    "X-" + config.AlgoPrefix + "-Algorithm=" + config.AlgoPrefix + "-HMAC-" + config.HashAlgo,
+    "X-" + config.AlgoPrefix + "-Credentials=" + url.QueryEscape(config.generateCredentials()),
+    "X-" + config.AlgoPrefix + "-Date=" + config.Date,
+    "X-" + config.AlgoPrefix + "-Expires=" + strconv.Itoa(expires),
+    "X-" + config.AlgoPrefix + "-SignedHeaders=host",
+  }
+  u.RawQuery += strings.Join(escherParams, "&")
+
+  escherRequest := createEscherRequestForPresignUrl(u)
+  canonicalizedRequest := config.getCanonicalizedRequest(escherRequest, []string{"host"})
+  stringToSign := config.getStringToSignForCanonicalizedRequest(canonicalizedRequest)
+  signature := config.calculateSignature(stringToSign, config.calculateSigningKey())
+  u.RawQuery += "&X-" + config.AlgoPrefix + "-Signature=" + signature
+
+  return u.String()
+}
+
 func (config EscherConfig) SignRequest(request EscherRequest, headersToSign []string) EscherRequest {
   var authHeader = config.GenerateHeader(request, headersToSign)
-  for _, header := range config.getDefaultHeaders(request.Headers) {
+  var headersWithDefaultsToSign = config.addDefaultsToHeadersToSign(headersToSign)
+  for _, header := range config.getDefaultHeaders(request.Headers, headersWithDefaultsToSign) {
     request.Headers = append(request.Headers, header)
   }
   request.Headers = append(request.Headers, [2]string { config.AuthHeaderName, authHeader })
@@ -63,6 +90,11 @@ func (config EscherConfig) SignRequest(request EscherRequest, headersToSign []st
 }
 
 func (config EscherConfig) CanonicalizeRequest(request EscherRequest, headersToSign []string) string {
+  headersToSign = config.addDefaultsToHeadersToSign(headersToSign)
+  return config.getCanonicalizedRequest(request, headersToSign)
+}
+
+func (config EscherConfig) getCanonicalizedRequest(request EscherRequest, headersToSign []string) string {
   var url = parsePathQuery(request.Url)
   var canonicalizedRequest = request.Method + "\n" +
     canonicalizePath(url.Path) + "\n" +
@@ -74,7 +106,6 @@ func (config EscherConfig) CanonicalizeRequest(request EscherRequest, headersToS
 }
 
 func (config EscherConfig) canonicalizeHeaders(headers EscherRequestHeaders, headersToSign []string) string {
-  headersToSign = config.addDefaultsToHeadersToSign(headersToSign)
   headers = config.keepHeadersToSign(headers, headersToSign)
   var headersArray []string
   headersHash := make(map[string][]string)
@@ -85,7 +116,7 @@ func (config EscherConfig) canonicalizeHeaders(headers EscherRequestHeaders, hea
   for hName, hValue := range headersHash {
     headersArray = append(headersArray, strings.ToLower(hName) + ":" + strings.Join(hValue, ",") + "\n")
   }
-  for _, header := range config.getDefaultHeaders(headers) {
+  for _, header := range config.getDefaultHeaders(headers, headersToSign) {
     headersArray = append(headersArray, strings.ToLower(header[0]) + ":" + header[1] + "\n")
   }
   sort.Strings(headersArray)
@@ -107,7 +138,6 @@ func normalizeHeaderValue(value string) string {
 }
 
 func (config EscherConfig) canonicalizeHeadersToSign(headers []string) string {
-  headers = config.addDefaultsToHeadersToSign(headers)
   var h []string
   for _, header := range headers {
     h = append(h, strings.ToLower(header))
@@ -115,7 +145,6 @@ func (config EscherConfig) canonicalizeHeadersToSign(headers []string) string {
   sort.Strings(h)
   return strings.Join(h, ";")
 }
-
 
 func canonicalizeQuery(query EshcerRequestQuery) string {
   var q []string
@@ -165,18 +194,23 @@ func parsePathQuery(pathAndQuery string) parsedPathQuery {
 }
 
 func (config EscherConfig) GetStringToSign(request EscherRequest, headersToSign []string) string {
+  return config.getStringToSignForCanonicalizedRequest(config.CanonicalizeRequest(request, headersToSign))
+}
+
+func (config EscherConfig) getStringToSignForCanonicalizedRequest(canonicalizedRequest string) string {
   return config.AlgoPrefix + "-HMAC-" + config.HashAlgo + "\n" +
     config.Date + "\n" +
     config.shortDate() + "/" + config.CredentialScope + "\n" +
-    config.computeDigest(config.CanonicalizeRequest(request, headersToSign))
+    config.computeDigest(canonicalizedRequest)
 }
 
 func (config EscherConfig) GenerateHeader(request EscherRequest, headersToSign []string) string {
   var stringToSign = config.GetStringToSign(request, headersToSign)
   var signingKey = config.calculateSigningKey()
+  var headersWithDefaultsToSign = config.addDefaultsToHeadersToSign(headersToSign)
   return config.AlgoPrefix + "-HMAC-" + config.HashAlgo + " " +
     "Credential=" + config.generateCredentials() + ", " +
-    "SignedHeaders=" + config.canonicalizeHeadersToSign(headersToSign) + ", " +
+    "SignedHeaders=" + config.canonicalizeHeadersToSign(headersWithDefaultsToSign) + ", " +
     "Signature=" + config.calculateSignature(stringToSign, signingKey)
 }
 
@@ -190,9 +224,9 @@ func sliceContainsCaseInsensitive(needle string, stack []string) bool {
   return false
 }
 
-func (config EscherConfig) getDefaultHeaders(headers EscherRequestHeaders) EscherRequestHeaders {
+func (config EscherConfig) getDefaultHeaders(headers EscherRequestHeaders, headersToSign []string) EscherRequestHeaders {
   var newHeaders EscherRequestHeaders
-  if !hasHeader(config.DateHeaderName, headers) {
+  if sliceContainsCaseInsensitive(config.DateHeaderName, headersToSign) && !hasHeader(config.DateHeaderName, headers) {
     dateHeader := config.Date
     if strings.ToLower(config.DateHeaderName) == "date" {
       var t, _ = time.Parse("20060102T150405Z", config.Date)
@@ -310,4 +344,15 @@ func hasHeader(headerName string, headers EscherRequestHeaders) bool {
     }
   }
   return false
+}
+
+func createEscherRequestForPresignUrl(u *url.URL) EscherRequest {
+  return EscherRequest{
+    Method: "GET",
+    Url:    u.RequestURI(),
+    Headers: [][2]string{
+      {"host", u.Host},
+    },
+    Body: "UNSIGNED-PAYLOAD",
+  }
 }
